@@ -1,12 +1,18 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, renderHook, screen } from '@testing-library/react'
 import { atom } from 'nanostores'
 import { createRef } from 'react'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type * as ConfigApi from '@/api/config'
+import { assistantTextPart, type ChatMessage } from '@/lib/chat-messages'
+import { playSpeechText } from '@/lib/voice-playback'
 import { $settingsRequestProfile } from '@/store/settings-scope'
+import { $autoSpeakReplies, setAutoSpeakReplies } from '@/store/voice-prefs'
+
+import { useAutoSpeakReplies } from '../chat/composer/hooks/use-auto-speak-replies'
+import { ComposerScopeProvider, MAIN_COMPOSER_SCOPE } from '../chat/composer/scope'
 
 import type { ConfigSettings as ConfigSettingsType } from './config-settings'
 
@@ -33,6 +39,9 @@ vi.mock('@/hermes', async () => ({
   getElevenLabsVoices: () => getElevenLabsVoices(),
   setApiRequestProfile: () => {}
 }))
+
+vi.mock('@/lib/voice-playback', () => ({ playSpeechText: vi.fn(async () => true) }))
+vi.mock('@/store/ambient', () => ({ ownsAmbientCue: async () => true }))
 
 vi.mock('../hooks/use-on-profile-switch', () => ({
   useOnProfileSwitch: () => {}
@@ -71,6 +80,7 @@ beforeAll(async () => {
 
 beforeEach(() => {
   scopeProfileMock.set('default')
+  void setAutoSpeakReplies(false)
   getElevenLabsVoices.mockResolvedValue({ available: false })
   getHermesConfigSchema.mockResolvedValue({ fields: {} })
   saveHermesConfig.mockResolvedValue({ ok: true })
@@ -148,6 +158,78 @@ describe('ConfigSettings autosave', () => {
       await vi.advanceTimersByTimeAsync(700)
 
       await vi.waitFor(() => expect(saveHermesConfig).toHaveBeenCalledWith({ checkpoints: { enabled: true } }, 'nash'))
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('Voice settings desktop read-aloud', () => {
+  it('shows the actual Desktop preference even when messaging auto_tts differs, and follows composer changes', async () => {
+    getHermesConfigRecord.mockResolvedValue({ voice: { auto_tts: true } })
+    renderConfigSettings('voice')
+
+    const toggle = await screen.findByRole('switch', { name: 'Read Responses Aloud' })
+
+    expect(toggle.getAttribute('aria-checked')).toBe('false')
+    await act(() => setAutoSpeakReplies(true))
+    expect(toggle.getAttribute('aria-checked')).toBe('true')
+    expect(screen.getByText('this app, same for every profile')).toBeTruthy()
+    expect(saveHermesConfig).not.toHaveBeenCalled()
+  })
+
+  it('enables future typed replies through Settings without writing messaging or another profile’s config', async () => {
+    scopeProfileMock.set('nash')
+    getHermesConfigRecord.mockResolvedValue({ voice: { auto_tts: false } })
+    const $messages = atom<ChatMessage[]>([])
+    let reply: null | { id: string; pending: boolean; text: string } = null
+
+    renderHook(
+      () =>
+        useAutoSpeakReplies({
+          conversationActive: false,
+          failureLabel: 'playback failed',
+          markSpoken: () => {
+            reply = null
+          },
+          pendingReply: () => reply,
+          sessionId: 'typed-reply-after-settings-toggle'
+        }),
+      {
+        wrapper: ({ children }) => (
+          <ComposerScopeProvider
+            value={{ ...MAIN_COMPOSER_SCOPE, $messages, connectionId: 'gw-chat', profile: 'chat-owner' }}
+          >
+            {children}
+          </ComposerScopeProvider>
+        )
+      }
+    )
+
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+
+    try {
+      renderConfigSettings('voice')
+      const toggle = await screen.findByRole('switch', { name: 'Read Responses Aloud' })
+      fireEvent.click(toggle)
+      expect($autoSpeakReplies.get()).toBe(true)
+      expect(playSpeechText).not.toHaveBeenCalled()
+
+      act(() => {
+        reply = { id: 'future-typed-reply', pending: false, text: 'Here is the typed reply.' }
+        $messages.set([{ id: reply.id, role: 'assistant', parts: [assistantTextPart(reply.text)] }])
+      })
+      await vi.waitFor(() =>
+        expect(playSpeechText).toHaveBeenCalledWith('Here is the typed reply.', {
+          connectionId: 'gw-chat',
+          messageId: 'future-typed-reply',
+          profile: 'chat-owner',
+          source: 'read-aloud'
+        })
+      )
+      await vi.advanceTimersByTimeAsync(700)
+      expect(saveHermesConfig).not.toHaveBeenCalled()
+      expect(localStorage.getItem('hermes.desktop.autoSpeakReplies')).toBe('true')
     } finally {
       vi.useRealTimers()
     }

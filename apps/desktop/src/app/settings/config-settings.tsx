@@ -30,6 +30,7 @@ import { notify, notifyError } from '@/store/notifications'
 import { normalizeProfileKey } from '@/store/profile'
 import { repoDiscoveryPolicyFromConfig, repoDiscoveryPolicySignature, scanAndRecordRepos } from '@/store/projects'
 import { $settingsRequestProfile } from '@/store/settings-scope'
+import { $autoSpeakReplies, setAutoSpeakReplies } from '@/store/voice-prefs'
 import type { ConfigFieldSchema, HermesConfigRecord } from '@/types/hermes'
 
 import { hermesConfigCacheWriter, useHermesConfigRecord } from '../hooks/use-config-record'
@@ -117,6 +118,7 @@ function ConfigSettingsInner({
 
   const disableF12 = useStore($disableF12)
   const alwaysExternalLinks = useStore($alwaysExternalLinks)
+  const autoSpeakReplies = useStore($autoSpeakReplies)
   // The editable draft is local (debounced autosave watches it), but it's seeded
   // from — and saved back through — the shared config cache, so edits are visible
   // in the MCP/model surfaces and reopening the page doesn't reload-flash.
@@ -516,7 +518,9 @@ function ConfigSettingsInner({
               ) : (
                 <ConfigField
                   descriptionExtra={
-                    key === 'memory.provider' && isExternalMemoryProvider(getNested(config, key)) ? (
+                    key === 'voice.auto_tts' ? (
+                      <span>{t.skills.plugins.halfDesktopHint}</span>
+                    ) : key === 'memory.provider' && isExternalMemoryProvider(getNested(config, key)) ? (
                       <MemoryConnect profile={scopeProfile} provider={String(getNested(config, key))} />
                     ) : undefined
                   }
@@ -525,11 +529,21 @@ function ConfigSettingsInner({
                       ? enumOptionsFor(key, getNested(config, key), config, elevenLabsVoiceOptions ?? undefined)
                       : enumOptionsFor(key, getNested(config, key), config)
                   }
-                  onChange={value => updateConfig(setConfigField(config, key, value))}
+                  onChange={value => {
+                    // Read-aloud belongs to this app, independently of the
+                    // selected profile's messaging gateway voice.auto_tts.
+                    if (key === 'voice.auto_tts') {
+                      void setAutoSpeakReplies(Boolean(value))
+
+                      return
+                    }
+
+                    updateConfig(setConfigField(config, key, value))
+                  }}
                   optionLabels={key === 'tts.elevenlabs.voice_id' ? elevenLabsVoiceLabels : undefined}
                   schema={field}
                   schemaKey={key}
-                  value={configFieldValue(config, key)}
+                  value={key === 'voice.auto_tts' ? autoSpeakReplies : configFieldValue(config, key)}
                 />
               )}
               {key === 'memory.provider' && isExternalMemoryProvider(getNested(config, key)) ? (
