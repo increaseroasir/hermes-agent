@@ -2,8 +2,10 @@ import { resolveGatewayWsUrl } from '@hermes/shared'
 
 import type { OwnerScope } from '@/api/client'
 import { getApiRequestConnection, getApiRequestProfile, speakText } from '@/hermes'
+import { translateNow } from '@/i18n'
 import { directTtsConfig, type DirectTtsConfig, synthesizeSpeechClientDirect } from '@/lib/voice-client-direct'
 import { RECONNECT_ATTEMPT_TIMEOUT_MS, withTimeout } from '@/lib/with-timeout'
+import { notifyError } from '@/store/notifications'
 import {
   $voicePlayback,
   setVoicePlaybackState,
@@ -232,6 +234,7 @@ function openClientDirectSpeechSession(tts: DirectTtsConfig, options: VoicePlayb
   const queue: string[] = []
   let synthesizing = false
   let playing: HTMLAudioElement | null = null
+  const synthesisAbort = new AbortController()
 
   let settle: (value: 'done' | 'fallback') => void = () => undefined
 
@@ -239,7 +242,7 @@ function openClientDirectSpeechSession(tts: DirectTtsConfig, options: VoicePlayb
   // queued audio never resumes. Registered until settle, so a barge always
   // reaches this session even while another playback is live alongside it
   // (#91991).
-  const stop = () => settle(started ? 'done' : 'fallback')
+  const stop = () => settle('done')
 
   const done = new Promise<'done' | 'fallback'>(resolve => {
     settle = value => {
@@ -248,6 +251,7 @@ function openClientDirectSpeechSession(tts: DirectTtsConfig, options: VoicePlayb
       }
 
       settled = true
+      synthesisAbort.abort()
       liveStops.delete(stop)
 
       if (playing) {
@@ -276,11 +280,15 @@ function openClientDirectSpeechSession(tts: DirectTtsConfig, options: VoicePlayb
         let bytes: ArrayBuffer
 
         try {
-          bytes = await synthesizeSpeechClientDirect(tts, sentence)
-        } catch {
-          // Provider rejected mid-reply. Nothing played yet → let the caller
-          // fall back to the relay with the full text. Mid-playback → treat
-          // what played as the playback (replaying would stutter).
+          bytes = await synthesizeSpeechClientDirect(tts, sentence, synthesisAbort.signal)
+        } catch (error) {
+          if (settled) {
+            return
+          }
+
+          notifyError(error, translateNow('notifications.voice.playbackFailed'))
+          // Keep the existing fallback only before audio starts; never replay
+          // sentences already heard after a terminal provider failure.
           settle(started ? 'done' : 'fallback')
 
           return

@@ -397,8 +397,95 @@ export async function directTtsConfig(owner?: OwnerScope): Promise<DirectTtsConf
   return config?.tts && config.tts.mode === 'direct' ? config.tts : null
 }
 
-/** Synthesize one text segment to audio bytes (mp3). Throws on provider rejection. */
-export async function synthesizeSpeechClientDirect(tts: DirectTtsConfig, text: string): Promise<ArrayBuffer> {
+// One segment, including its retry and body download, must release the voice
+// conversation even if the provider stalls. A retry never includes played audio.
+const TTS_REQUEST_TIMEOUT_MS = 30_000
+const TTS_RETRY_DELAY_MS = 500
+const TTS_MAX_RETRY_DELAY_MS = 5_000
+
+class TtsRequestError extends Error {
+  readonly retryable: boolean
+  readonly retryAfterMs: number
+
+  constructor(provider: string, response: Response) {
+    // Provider bodies can echo user text or credentials; status is enough for
+    // the notification/log path and for deciding whether one retry is useful.
+    super(`${provider} TTS error (HTTP ${response.status})`)
+    this.retryable =
+      response.status === 408 || response.status === 429 || (response.status >= 500 && response.status < 600)
+    const retryAfter = response.headers.get('Retry-After')
+    const seconds = retryAfter === null ? NaN : Number(retryAfter)
+    const delay = Number.isFinite(seconds) ? seconds * 1_000 : Date.parse(retryAfter ?? '') - Date.now()
+    this.retryAfterMs = Number.isFinite(delay)
+      ? Math.max(0, Math.min(delay, TTS_MAX_RETRY_DELAY_MS))
+      : TTS_RETRY_DELAY_MS
+    void response.body?.cancel().catch(() => undefined)
+  }
+}
+
+function waitForTtsRetry(delayMs: number, signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted()
+
+  return new Promise((resolve, reject) => {
+    const abort = () => {
+      clearTimeout(timer)
+      reject(signal.reason)
+    }
+
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', abort)
+      resolve()
+    }, delayMs)
+
+    signal.addEventListener('abort', abort, { once: true })
+  })
+}
+
+/** Synthesize one segment; one transient retry, bounded and cancellable. */
+export async function synthesizeSpeechClientDirect(
+  tts: DirectTtsConfig,
+  text: string,
+  signal?: AbortSignal
+): Promise<ArrayBuffer> {
+  signal?.throwIfAborted()
+  const controller = new AbortController()
+  const abort = () => controller.abort(signal?.reason)
+  signal?.addEventListener('abort', abort, { once: true })
+
+  const timer = setTimeout(
+    () => controller.abort(new Error('Speech synthesis timed out after 30s')),
+    TTS_REQUEST_TIMEOUT_MS
+  )
+
+  try {
+    try {
+      return await synthesizeSpeechAttempt(tts, text, controller.signal)
+    } catch (error) {
+      controller.signal.throwIfAborted()
+      const retryable = error instanceof TtsRequestError ? error.retryable : error instanceof TypeError
+
+      if (!retryable) {
+        throw error
+      }
+
+      await waitForTtsRetry(
+        error instanceof TtsRequestError ? error.retryAfterMs : TTS_RETRY_DELAY_MS,
+        controller.signal
+      )
+
+      return await synthesizeSpeechAttempt(tts, text, controller.signal)
+    }
+  } catch (error) {
+    controller.signal.throwIfAborted()
+    // Network errors are not a trusted provider message either.
+    throw error instanceof TtsRequestError ? error : new Error(`${tts.provider} TTS request failed`)
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', abort)
+  }
+}
+
+async function synthesizeSpeechAttempt(tts: DirectTtsConfig, text: string, signal: AbortSignal): Promise<ArrayBuffer> {
   if (tts.wire === 'openai-speech') {
     const body: Record<string, unknown> = {
       ...(tts.extra_body ?? {}),
@@ -418,11 +505,12 @@ export async function synthesizeSpeechClientDirect(tts: DirectTtsConfig, text: s
         Authorization: `Bearer ${tts.api_key}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      signal
     })
 
     if (!response.ok) {
-      throw new Error(`${tts.provider} TTS error (HTTP ${response.status}): ${await providerErrorText(response)}`)
+      throw new TtsRequestError(tts.provider, response)
     }
 
     return response.arrayBuffer()
@@ -438,12 +526,13 @@ export async function synthesizeSpeechClientDirect(tts: DirectTtsConfig, text: s
           'Content-Type': 'application/json',
           Accept: 'audio/mpeg'
         },
-        body: JSON.stringify({ text, model_id: tts.model })
+        body: JSON.stringify({ text, model_id: tts.model }),
+        signal
       }
     )
 
     if (!response.ok) {
-      throw new Error(`ElevenLabs TTS error (HTTP ${response.status}): ${await providerErrorText(response)}`)
+      throw new TtsRequestError('ElevenLabs', response)
     }
 
     return response.arrayBuffer()

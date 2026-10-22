@@ -439,13 +439,76 @@ describe('synthesizeSpeechClientDirect', () => {
     expect((init.headers as Record<string, string>)['xi-api-key']).toBe('sk_tts')
   })
 
+  it.each([408, 429, 500, 503])('retries HTTP %s once and honors a bounded Retry-After', async status => {
+    vi.useFakeTimers()
+
+    try {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(new Response('', { status, headers: { 'Retry-After': '2' } }))
+        .mockResolvedValueOnce(new Response(new Uint8Array([7]), { status: 200 }))
+
+      vi.stubGlobal('fetch', fetchMock)
+      const pending = synthesizeSpeechClientDirect(openaiTts, 'Hi.')
+      void pending.catch(() => undefined)
+      await vi.advanceTimersByTimeAsync(1_999)
+      expect(fetchMock).toHaveBeenCalledOnce()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(new Uint8Array(await pending)).toEqual(new Uint8Array([7]))
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('retries a network failure only once', async () => {
+    vi.useFakeTimers()
+
+    try {
+      const fetchMock = vi
+        .fn()
+        .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+        .mockResolvedValueOnce(new Response('', { status: 429, headers: { 'Retry-After': '3600' } }))
+
+      vi.stubGlobal('fetch', fetchMock)
+      const pending = synthesizeSpeechClientDirect(openaiTts, 'Hi.')
+      void pending.catch(() => undefined)
+      await vi.advanceTimersByTimeAsync(5_000)
+      await expect(pending).rejects.toThrow(/HTTP 429/)
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('caps a provider Retry-After at five seconds', async () => {
+    vi.useFakeTimers()
+
+    try {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(new Response('', { status: 429, headers: { 'Retry-After': '3600' } }))
+        .mockResolvedValueOnce(new Response(new Uint8Array([7]), { status: 200 }))
+
+      vi.stubGlobal('fetch', fetchMock)
+      const pending = synthesizeSpeechClientDirect(openaiTts, 'Hi.')
+      void pending.catch(() => undefined)
+      await vi.advanceTimersByTimeAsync(4_999)
+      expect(fetchMock).toHaveBeenCalledOnce()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(new Uint8Array(await pending)).toEqual(new Uint8Array([7]))
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('throws on provider rejection', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => new Response('quota exceeded', { status: 429 }))
+      vi.fn(async () => new Response('unauthorized', { status: 401 }))
     )
 
-    await expect(synthesizeSpeechClientDirect(openaiTts, 'Hi.')).rejects.toThrow(/openai TTS error.*429/)
+    await expect(synthesizeSpeechClientDirect(openaiTts, 'Hi.')).rejects.toThrow(/openai TTS error.*401/)
   })
 })
 
