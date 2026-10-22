@@ -163,8 +163,8 @@ export function usePluginSettingsRoute(active: boolean) {
   return { entries, missing: Boolean(route) && !target && !waiting, open, pending: active && waiting, target }
 }
 
-/** Every plugin settings page, live: Desktop plugins' registered pages plus an
- *  automatic page for each agent plugin that declares a `config_schema`
+/** Every enabled plugin, live: desktop information or registered pages plus
+ *  automatic information or schema pages for agent plugins
  *  (scoped to the Settings profile selector). */
 export function usePluginSettingsEntries(): PluginSettingsEntry[] {
   const { t } = useI18n()
@@ -194,6 +194,7 @@ export function usePluginSettingsEntries(): PluginSettingsEntry[] {
       pluginSettingsEntries({
         configTitle,
         contributions,
+        desktopPlugins: Object.values(records),
         packageOf: pluginId => {
           const record = records[pluginId]
 
@@ -331,6 +332,45 @@ function PluginSettingsLoading() {
   )
 }
 
+/** Plugins without controls still have a useful destination, with the same
+ *  management action as the overview. */
+interface PluginInformationPageProps {
+  description?: string
+  kind: 'agent' | 'desktop'
+  title: string
+  version?: string
+}
+
+function PluginInformationPage({ description, kind, title, version }: PluginInformationPageProps) {
+  const { t } = useI18n()
+
+  return (
+    <SettingsContent>
+      <SettingsProfileScope className="mb-5" />
+      <SectionHeading
+        aside={
+          <Button asChild className="gap-1.5" size="sm" variant="outline">
+            <a href={MANAGE_PLUGINS_HREF}>
+              {t.settings.pluginPages.manage}
+              <Codicon name="arrow-right" size="0.75rem" />
+            </a>
+          </Button>
+        }
+        icon={PLUGINS_NAV_ICON}
+        page
+        title={title}
+      />
+      {description && <p className={BLURB_CLASS}>{description}</p>}
+      <p className={BLURB_CLASS}>
+        {kind === 'agent' ? t.skills.plugins.kindAgent : t.skills.plugins.kindDesktop}
+        {' · '}
+        {t.messaging.enabled}
+      </p>
+      {version && <p className={BLURB_CLASS}>{t.updates.version(version)}</p>}
+    </SettingsContent>
+  )
+}
+
 /** Automatic page for an agent plugin's manifest `config_schema`: the schema
  *  form, saved through `plugins.manage settings` (+ `.env` for secrets).
  *
@@ -346,8 +386,12 @@ function PluginSchemaSettingsPage({ agentKey, owner }: { agentKey: string; owner
   const row = rows.find(candidate => candidate.key === agentKey)
   const busy = useStore($agentPluginBusy) === agentKey
 
-  if (!row?.settings_schema?.length) {
+  if (!row) {
     return <PluginSettingsLoading />
+  }
+
+  if (!row.settings_schema?.length) {
+    return <PluginInformationPage description={row.description} kind="agent" title={row.name} version={row.version} />
   }
 
   return (
@@ -430,7 +474,7 @@ export function PluginSettingsPane({
   const render = node.render
 
   if (!render) {
-    return <PluginSettingsOverview entries={entries} missing onOpen={onOpen} />
+    return <PluginInformationPage description={node.description} kind={target.entry.kind} title={node.title} />
   }
 
   // Keyed per page so a sub-page switch remounts the plugin's tree (fresh
