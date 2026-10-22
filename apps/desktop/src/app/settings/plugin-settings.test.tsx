@@ -1,8 +1,9 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createPluginContext } from '@/contrib/plugin'
+import { $pluginRecords, dropPlugin, publishPlugin } from '@/contrib/plugins-store'
 import { type PluginSettingsRoute, resolvePluginSettingsTarget } from '@/contrib/settings-pages'
 import { $agentPlugins, $agentPluginsStatus, type AgentPluginRow } from '@/store/agent-plugins'
 
@@ -72,6 +73,7 @@ describe('Settings ▸ Plugins', () => {
     $agentPlugins.set([])
     $agentPluginsStatus.set('idle')
     requestGateway.mockClear()
+    $pluginRecords.set({})
   })
 
   afterEach(() => {
@@ -135,6 +137,45 @@ describe('Settings ▸ Plugins', () => {
         values: { region: 'eu' }
       })
     )
+  })
+
+  it('opens useful information for an enabled plugin without settings and follows Marketplace updates', async () => {
+    const noSchema = { ...notesRow, key: 'voice', name: 'Voice', settings_schema: [] }
+
+    requestGateway.mockImplementationOnce(async () => ({ plugins: [noSchema] }))
+    render(<Harness />)
+
+    await waitFor(() => expect(railItem('plugins:agent:voice')).toBeTruthy())
+    fireEvent.click(railItem('plugins:agent:voice')!)
+    expect(screen.getByText('Voice', { selector: 'section span' })).toBeTruthy()
+    expect(screen.getByText('Daily notes')).toBeTruthy()
+    expect(screen.getByText(/ · Enabled/)).toBeTruthy()
+    expect(screen.getByRole('link', { name: /Manage plugins/ }).getAttribute('href')).toBe('#/capabilities?tab=plugins')
+    expect(screen.queryByRole('button', { name: 'Save settings' })).toBeNull()
+
+    act(() => $agentPlugins.set([{ ...noSchema, status: 'disabled' }]))
+    await waitFor(() => expect(railItem('plugins:agent:voice')).toBeNull())
+    act(() => $agentPlugins.set([noSchema]))
+    await waitFor(() => expect(railItem('plugins:agent:voice')).toBeTruthy())
+  })
+
+  it('opens useful information for loaded desktop plugins with no settings contribution', async () => {
+    publishPlugin({
+      id: 'talk',
+      name: 'Hermes Talk',
+      kind: 'bundled',
+      status: 'loaded',
+      description: 'Voice conversations'
+    })
+    disposers.push(() => dropPlugin('talk'))
+    render(<Harness />)
+
+    await waitFor(() => expect(railItem('plugins:agent:notes')).toBeTruthy())
+    fireEvent.click(railItem('plugins:desktop:talk')!)
+    expect(screen.getByText('Hermes Talk', { selector: 'section span' })).toBeTruthy()
+    expect(screen.getByText('Voice conversations')).toBeTruthy()
+    expect(screen.getByText(/ · Enabled/)).toBeTruthy()
+    expect(screen.getByRole('link', { name: /Manage plugins/ })).toBeTruthy()
   })
 
   it('drops a disabled plugin’s page from the list', async () => {

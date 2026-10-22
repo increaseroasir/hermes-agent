@@ -105,25 +105,45 @@ describe('pluginSettingsEntries', () => {
     expect(entry?.children.map(child => child.title)).toEqual(['Units', 'Alerts'])
   })
 
-  it('gives every agent plugin with a config_schema its own automatic page', () => {
+  it('includes enabled agents without settings while preserving schema pages', () => {
     const entries = pluginSettingsEntries({
       configTitle: 'Agent settings',
       contributions: [],
       rows: [
         row({ key: 'no-schema', name: 'no-schema' }),
+        row({ key: 'disabled', status: 'disabled' }),
         row({ key: 'notes', name: 'notes', settings_schema: [field] }),
         row({ name: 'keyless', settings_schema: [field] })
       ]
     })
 
-    expect(entries).toHaveLength(1)
-    expect(entries[0]).toMatchObject({
+    expect(entries.map(entry => entry.key)).toEqual(['no-schema', 'notes'])
+    expect(entries[1]).toMatchObject({
       agentKey: 'notes',
       children: [],
       key: 'notes',
       kind: 'agent',
       title: 'notes',
       uid: 'agent:notes'
+    })
+  })
+
+  it('includes loaded desktop plugins without custom settings and avoids duplicate pages', () => {
+    const entries = pluginSettingsEntries({
+      configTitle: 'Agent settings',
+      contributions: [page('weather:main', 'Weather')],
+      desktopPlugins: [
+        { id: 'talk', kind: 'bundled', name: 'Hermes Talk', status: 'loaded', description: 'Voice conversations' },
+        { id: 'weather', kind: 'disk', name: 'Weather', status: 'loaded' },
+        { id: 'off', kind: 'disk', name: 'Off', status: 'disabled' }
+      ],
+      rows: []
+    })
+
+    expect(entries.map(entry => entry.title)).toEqual(['Hermes Talk', 'Weather'])
+    expect(resolvePluginSettingsTarget(entries, { plugin: 'talk' })?.entry).toMatchObject({
+      description: 'Voice conversations',
+      pluginId: 'talk'
     })
   })
 

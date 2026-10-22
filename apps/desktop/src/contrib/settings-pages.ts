@@ -7,8 +7,8 @@
  *  - Desktop plugins call `ctx.registerSettingsPage(...)` (a contribution in
  *    `SETTINGS_PLUGINS_AREA`, so provenance + disable/unload cleanup come from
  *    the registry like every other contribution).
- *  - Agent plugins whose `plugin.yaml` declares a `config_schema` get an
- *    automatic page rendering the schema form — no Desktop code required. A
+ *  - Enabled agent plugins get an automatic information page; a declared
+ *    `config_schema` renders the schema form — no Desktop code required. A
  *    unified package that does both shows ONE entry; the schema form becomes
  *    its "Agent settings" sub-page.
  *
@@ -26,6 +26,7 @@ import type { ReactNode } from 'react'
 
 import type { AgentPluginRow } from '@/store/agent-plugins'
 
+import type { PluginRecord } from './plugins-store'
 import type { Contribution } from './types'
 
 /** Contribution area for plugin settings pages. Same id as the section area
@@ -64,6 +65,8 @@ export interface PluginSettingsNode {
    *  `agentKey` instead, so they never take an id a plugin could choose. */
   id: string
   title: string
+  /** Plugin description for a page without custom controls. */
+  description?: string
   /** Plugin-rendered content. Absent on schema-form nodes. */
   render?: () => ReactNode
   /** Agent plugin key whose `config_schema` form this node renders. */
@@ -180,6 +183,8 @@ const pluginIdOf = (source: string | undefined) =>
 export interface PluginSettingsEntriesInput {
   /** Live `SETTINGS_PLUGINS_AREA` contributions. */
   contributions: readonly Contribution[]
+  /** Loaded desktop plugins, including those without settings contributions. */
+  desktopPlugins?: readonly PluginRecord[]
   /** Agent plugin rows (already filtered to what the user can manage). */
   rows: readonly AgentPluginRow[]
   /** Label for a schema form folded under a desktop page. */
@@ -192,6 +197,7 @@ export interface PluginSettingsEntriesInput {
 export function pluginSettingsEntries({
   configTitle,
   contributions,
+  desktopPlugins = [],
   packageOf,
   rows
 }: PluginSettingsEntriesInput): PluginSettingsEntry[] {
@@ -218,8 +224,26 @@ export function pluginSettingsEntries({
     })
   }
 
+  for (const record of desktopPlugins) {
+    if (record.status !== 'loaded' || entries.some(entry => entry.pluginId === record.id)) {
+      continue
+    }
+
+    entries.push({
+      children: [],
+      description: record.description,
+      id: record.id,
+      key: record.id,
+      kind: 'desktop',
+      order: 0,
+      pluginId: record.id,
+      title: record.name,
+      uid: `desktop:${record.id}`
+    })
+  }
+
   for (const row of rows) {
-    if (!row.key || !row.settings_schema?.length) {
+    if (!row.key || (!row.settings_schema?.length && row.status !== 'enabled')) {
       continue
     }
 
@@ -234,7 +258,7 @@ export function pluginSettingsEntries({
     })
 
     if (owner) {
-      if (!owner.children.some(child => child.agentKey)) {
+      if (row.settings_schema?.length && !owner.children.some(child => child.agentKey)) {
         owner.children.push({ agentKey: row.key, id: row.key, title: configTitle })
       }
 
