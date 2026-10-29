@@ -265,7 +265,9 @@ async def authenticate_native_http(request):
     try:
         # The ticket names the served profile it was minted for; that home's authority owns it.
         grant = _redeem_http_ticket(store, tickets[0], request)
-        if authority_for_profile_id(runner, grant['profile_id']) is None:
+        if (authority_for_profile_id(runner, grant['profile_id']) is None
+                and not (grant['purpose'] == 'native-profile-registry'
+                         and store.registry_profile_allowed(grant['profile_id']))):
             raise PermissionError('unserved native grant')
     except PermissionError:
         return JSONResponse({'detail': 'Unauthorized'}, status_code=401)

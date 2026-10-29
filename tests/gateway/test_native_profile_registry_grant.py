@@ -21,7 +21,7 @@ import pytest
 from tests.gateway.test_normal_runtime_boot import control
 
 
-@pytest.mark.platforms('linux')
+@pytest.mark.skipif(os.name == 'nt', reason='fixture shutdown uses POSIX signals')
 def test_registry_grant_renames_and_deletes_only_its_own_served_profile(tmp_path):
     home, user = tmp_path / 'state', tmp_path / 'user'
     home.mkdir(mode=0o700)
@@ -32,6 +32,9 @@ def test_registry_grant_renames_and_deletes_only_its_own_served_profile(tmp_path
     for name in ('beta', 'gamma', 'keep'):
         (home / 'profiles' / name).mkdir(parents=True)
         (home / 'profiles' / name / 'config.yaml').write_text(json.dumps(model))
+    (home / 'profiles' / 'parked').mkdir(parents=True)
+    (home / 'profiles' / 'parked' / 'config.yaml').write_text(json.dumps(model))
+    (home / 'profiles' / 'parked' / 'gateway.parked').touch()
     root = Path(__file__).resolve().parents[2]
     env = {k: os.environ[k] for k in ('PATH', 'LANG', 'TZ', 'TIRITH_ENABLED') if k in os.environ}
     env.update(HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home), PYTHONPATH=str(root),
@@ -81,6 +84,15 @@ def test_registry_grant_renames_and_deletes_only_its_own_served_profile(tmp_path
                 assert (home / 'profiles' / 'beta').is_dir()
 
                 registry = 'native-profile-registry'
+                # Parked profiles are not served but can be removed without starting them.
+                denied = client.delete('/api/profiles/beta', headers=grant('parked', registry))
+                assert denied.status_code == 403, denied.text
+                assert (home / 'profiles' / 'beta').exists()
+                denied = client.get('/api/profiles/beta/soul', headers=grant('parked', registry))
+                assert denied.status_code == 401, denied.text
+                response = client.delete('/api/profiles/parked', headers=grant('parked', registry))
+                assert response.status_code == 200, response.text
+                assert not (home / 'profiles' / 'parked').exists()
                 # Bound to the profile it was minted for: beta's grant cannot touch gamma.
                 response = client.delete('/api/profiles/gamma', headers=grant('beta', registry))
                 assert response.status_code == 403, response.text

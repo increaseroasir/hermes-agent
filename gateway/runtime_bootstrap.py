@@ -26,18 +26,21 @@ class TicketStore:
     TTL_SECONDS = 30
     MAX_ENTRIES = 1024
 
-    def __init__(self, instance_id: str, profile_ids: frozenset[str]):
+    def __init__(self, instance_id: str, profile_ids: frozenset[str], *, registry_profile_allowed=None):
         if not instance_id or not profile_ids:
             raise ValueError('bootstrap requires instance and served profiles')
         self.instance_id = instance_id
         self.profile_ids = frozenset(profile_ids)
+        self.registry_profile_allowed = registry_profile_allowed or (lambda _profile_id: False)
         self._entries: dict[str, tuple[float, dict]] = {}
         self._lock = threading.Lock()
 
     def mint(self, *, profile_id, subject, purpose, scope='profile') -> str:
         """``scope='host'`` lets an interactive connection select every profile this process
         serves (the Desktop's one shared socket); the default binds exactly ``profile_id``."""
-        if (profile_id not in self.profile_ids or purpose not in _PURPOSE_CAPABILITIES or not subject
+        allowed = profile_id in self.profile_ids or (purpose == 'native-profile-registry'
+                    and scope == 'profile' and self.registry_profile_allowed(profile_id))
+        if (not allowed or purpose not in _PURPOSE_CAPABILITIES or not subject
                 or scope not in _SCOPES or (scope == 'host' and purpose != 'interactive')):
             raise PermissionError('bootstrap binding rejected')
         with self._lock:
@@ -66,7 +69,10 @@ class TicketStore:
             if expires <= time.monotonic():
                 del self._entries[key]
                 raise PermissionError('expired bootstrap ticket')
-            served = grant['profile_id'] in self.profile_ids if profile_id is None else grant['profile_id'] == profile_id
+            eligible = (grant['profile_id'] in self.profile_ids or
+                        (grant['purpose'] == 'native-profile-registry' and
+                         self.registry_profile_allowed(grant['profile_id'])))
+            served = eligible and (profile_id is None or grant['profile_id'] == profile_id)
             if not served or grant['purpose'] != purpose:
                 raise PermissionError('bootstrap binding rejected')
             del self._entries[key]

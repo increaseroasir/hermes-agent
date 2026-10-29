@@ -19,6 +19,21 @@ import uuid
 logger = logging.getLogger(__name__)
 
 
+def parked_registry_profile_allowed(profile_id, root, registry):
+    """Permit registry tickets only for a stopped, direct child of the profile registry."""
+    if not isinstance(profile_id, str):
+        return False
+    try:
+        profiles = (Path(root).resolve() / 'profiles').resolve()
+        home = Path(profile_id)
+        if (not home.is_absolute() or home.parent != profiles or home.is_symlink()
+                or not home.is_dir() or home.resolve() != home):
+            return False
+        return (home / 'gateway.parked').is_file() and registry.for_home(home) is None
+    except (OSError, ValueError):
+        return False
+
+
 def reserved_profile_homes(runner):
     """``(name, home)`` pairs this process reserved: launch home first, then served secondaries."""
     from hermes_constants import get_hermes_home
@@ -161,7 +176,11 @@ async def initialize_gateway_runtime(runner):
     descriptor['served_profiles'] = registry.served_profiles()
     # Publish this boot's verdict (an empty map clears a previous run's parked set).
     _record_parked_profiles(parked_profile_map(runner))
-    runner.session_ticket_store = TicketStore(instance_id, registry.profile_ids())
+    from hermes_constants import get_default_hermes_root
+    root = get_default_hermes_root()
+    runner.session_ticket_store = TicketStore(
+        instance_id, registry.profile_ids(),
+        registry_profile_allowed=lambda home: parked_registry_profile_allowed(home, root, registry))
     release_unknown_turn_markers(runner)
 
 
